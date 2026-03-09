@@ -1,28 +1,69 @@
 # Integrately_Send-Form-Data
-Simple, quick-to-deploy JavaScript that sends contact form data to Integrately
 
-## In A Nutshell
-If you need to send a copy of whatever is submitted in a contact form to Integrately (https://integrately.com/) and you have access to add a bit of JavaScript to the web page then this will help you.
+Lightweight browser JavaScript for forwarding HTML form submissions to an [Integrately](https://integrately.com/) webhook.
 
-## How to add the code
+## What This Does
+`glIntegratelyWebhookLogic(formID, webhookURL, debug)` attaches a submit handler to your form and sends submitted form data to Integrately.
 
-### Uploading the core file
--- To be added (instructions on how to add the file to the server, and where to add it - suggest in "inc/js/<name-of-file>.js")
+It is designed to be simple to drop into existing websites where you can add a JavaScript file and a small init snippet.
 
-### Adding the snippet
--- to be updated once core code is refined.
+## Files
+- `glIntegratelyWebhook.js`: integration logic.
+- `README.md`: usage and testing guide.
+
+## Quick Start
+### 1. Add the script file
+Upload `glIntegratelyWebhook.js` to your site (for example, `inc/js/glIntegratelyWebhook.js`).
+
+### 2. Include it in your page
+```html
+<script src="/inc/js/glIntegratelyWebhook.js"></script>
+```
+
+### 3. Initialize it
 ```html
 <script>
   glIntegratelyWebhookLogic(
-  		'add-form-id-here', // Form ID
-  		'add-webhook-url-here', // Integrately Webhook URL; E.G. https://webhooks.integrately.com/a/webhooks/123456
-  		true // DEBUG (true/false)
+    'contact-form',
+    'https://webhooks.integrately.com/a/webhooks/123456',
+    true
   );
 </script>
 ```
 
-## What variables must be set
--- to be added
+## Parameters
+- `formID` (string): the `id` of the target `<form>` element.
+- `webhookURL` (string): your Integrately webhook URL.
+- `debug` (boolean, optional): prints diagnostics to console. Default is `false`.
 
-## How to test
--- to be added
+## Behavior Notes
+- The script does not block normal form submission.
+- It prefers `navigator.sendBeacon(...)` for better reliability during page navigation.
+- If `sendBeacon` cannot queue the request, it falls back to `fetch(..., { keepalive: true, mode: 'no-cors' })`.
+- In `no-cors` mode, browser responses are opaque, so delivery cannot be confirmed from JavaScript.
+- Duplicate listeners are prevented if initialization runs multiple times.
+
+## Local Development
+Check syntax:
+```bash
+node --check glIntegratelyWebhook.js
+```
+
+Serve a local test page:
+```bash
+python3 -m http.server 8080
+```
+
+## Manual Testing Checklist
+1. Create a form with `id="contact-form"` and initialize using that same ID.
+2. Submit test data and verify it appears in Integrately.
+3. Test with `debug=true` and confirm console messages.
+4. Test invalid inputs (wrong form ID, empty webhook URL) and confirm warnings.
+
+## Troubleshooting
+- No data in Integrately: confirm webhook URL is correct and active.
+- No console output: set `debug` to `true`.
+- Script not running: verify the JS file path and that the form exists when init runs.
+
+## License
+See [LICENSE](LICENSE).
