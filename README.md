@@ -23,11 +23,13 @@ Upload `glIntegratelyWebhook.js` to your site (for example, `inc/js/glIntegratel
 ### 3. Initialize it
 ```html
 <script>
-  glIntegratelyWebhookLogic(
-    'contact-form',
-    'https://webhooks.integrately.com/a/webhooks/123456',
-    true
-  );
+	document.addEventListener("DOMContentLoaded", function() {
+		glIntegratelyWebhookLogic(
+			'contact-form',
+			'https://webhooks.integrately.com/a/webhooks/123456',
+			true
+		);
+	});
 </script>
 ```
 
