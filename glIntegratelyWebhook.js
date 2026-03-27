@@ -4,8 +4,14 @@
  * @param {string} formID - The HTML id attribute of the form element.
  * @param {string} webhookURL - Integrately webhook endpoint URL.
  * @param {boolean|string} debug - false: silent, true: key logs, 'verbose': detailed logs.
+ * @param {Object} options - Optional webhook-only field injection settings.
+ * @param {boolean|string} options.injectTimestampField - true for default field name, or a custom field name.
+ * @param {boolean|string} options.injectPageSourceField - true for default field name, or a custom field name.
+ * @param {string} options.timestampFormat - Optional timestamp format: 'iso' (default) or 'human'.
+ * @param {string} options.timestampLocale - Optional locale for human timestamp formatting (for example, 'en-ZA').
+ * @param {boolean} options.preferPlaceholderFieldNames - Prefer placeholder-derived webhook field names for generic inputs.
  */
-function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
+function glIntegratelyWebhookLogic(formID, webhookURL, debug = false, options = {}) {
   const LOG_PREFIX = '[IntegratelyWebhook]';
   const debugEnabled = Boolean(debug);
   const verboseDebug = debug === 'verbose';
@@ -29,11 +35,40 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
       console.log(LOG_PREFIX, ...args);
     }
   };
+  const normalizedOptions = options && typeof options === 'object' ? options : {};
+  const resolveInjectedFieldName = (optionValue, defaultFieldName) => {
+    if (optionValue === true) {
+      return defaultFieldName;
+    }
+    if (typeof optionValue === 'string' && optionValue.trim() !== '') {
+      return optionValue.trim();
+    }
+    return null;
+  };
+  const timestampFieldName = resolveInjectedFieldName(
+    normalizedOptions.injectTimestampField,
+    'integrately_timestamp'
+  );
+  const pageSourceFieldName = resolveInjectedFieldName(
+    normalizedOptions.injectPageSourceField,
+    'integrately_page_source'
+  );
+  const timestampFormat = normalizedOptions.timestampFormat === 'human' ? 'human' : 'iso';
+  const timestampLocale = typeof normalizedOptions.timestampLocale === 'string' &&
+    normalizedOptions.timestampLocale.trim() !== ''
+    ? normalizedOptions.timestampLocale.trim()
+    : undefined;
+  const preferPlaceholderFieldNames = normalizedOptions.preferPlaceholderFieldNames === true;
 
   debugLog('Initialization started.');
   debugVerbose('Initialization details:', {
     formID,
-    webhookConfigured: typeof webhookURL === 'string' && webhookURL.trim() !== ''
+    webhookConfigured: typeof webhookURL === 'string' && webhookURL.trim() !== '',
+    timestampFieldName,
+    pageSourceFieldName,
+    timestampFormat,
+    timestampLocale,
+    preferPlaceholderFieldNames
   });
 
   if (typeof formID !== 'string' || formID.trim() === '') {
@@ -75,10 +110,161 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
     });
   };
 
-  const buildWebhookPayload = (sourceFormData) => {
+  const cleanFieldKey = (value) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    return value.trim();
+  };
+
+  const fieldKeyLooksGeneric = (value) => {
+    if (!value) {
+      return true;
+    }
+    return /^item\s+\d+$/i.test(value) ||
+      /^item\[\d+\](?:\[\])?$/i.test(value) ||
+      /^item(?:\[\d+\])+(?:\[\])?$/i.test(value) ||
+      /^field(?:s)?\[\d+\](?:\[[^\]]*\])*$/i.test(value) ||
+      /^field[_-]?\d+$/i.test(value) ||
+      /^input[_-]?\d+$/i.test(value) ||
+      /^\d+$/.test(value);
+  };
+
+  const sanitizeDerivedFieldKey = (value, separator = '_') => {
+    const cleaned = cleanFieldKey(value)
+      .replace(/\s+/g, ' ')
+      .replace(/[^a-zA-Z0-9]+/g, separator)
+      .replace(new RegExp(separator + '+', 'g'), separator)
+      .replace(new RegExp('^' + separator + '+|' + separator + '+$', 'g'), '')
+      .toLowerCase();
+    return cleaned;
+  };
+
+  const getAssociatedLabelText = (control) => {
+    if (!(control instanceof Element)) {
+      return '';
+    }
+
+    if (control.id) {
+      const explicitLabel = formElem.querySelector('label[for="' + control.id + '"]');
+      if (explicitLabel) {
+        return explicitLabel.textContent || '';
+      }
+    }
+
+    const wrappedLabel = control.closest('label');
+    if (wrappedLabel) {
+      return wrappedLabel.textContent || '';
+    }
+
+    const nearbyLabel = control.closest('.form-group, .field, .form-field, .form-row');
+    if (nearbyLabel) {
+      const labelElem = nearbyLabel.querySelector('label');
+      if (labelElem) {
+        return labelElem.textContent || '';
+      }
+    }
+
+    return '';
+  };
+
+  const deriveControlFieldKey = (control) => {
+    if (!(control instanceof Element)) {
+      return '';
+    }
+
+    const placeholder = sanitizeDerivedFieldKey(control.getAttribute('placeholder') || '', '-');
+    if (preferPlaceholderFieldNames && placeholder) {
+      return placeholder;
+    }
+
+    const labelText = sanitizeDerivedFieldKey(getAssociatedLabelText(control));
+    if (labelText) {
+      return labelText;
+    }
+
+    const ariaLabel = sanitizeDerivedFieldKey(control.getAttribute('aria-label') || '');
+    if (ariaLabel) {
+      return ariaLabel;
+    }
+
+    if (placeholder) {
+      return preferPlaceholderFieldNames ? placeholder : sanitizeDerivedFieldKey(
+        control.getAttribute('placeholder') || ''
+      );
+    }
+
+    const nameAttr = sanitizeDerivedFieldKey(control.getAttribute('name') || '');
+    if (nameAttr) {
+      return nameAttr;
+    }
+
+    return sanitizeDerivedFieldKey(control.id || '');
+  };
+
+  const getDomDerivedEntries = () => {
+    const entries = [];
+    const controls = formElem.querySelectorAll('input, select, textarea');
+
+    controls.forEach((control) => {
+      if (!(control instanceof HTMLInputElement ||
+        control instanceof HTMLSelectElement ||
+        control instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      const tagName = control.tagName.toLowerCase();
+      const inputType = tagName === 'input' ? (control.type || 'text').toLowerCase() : '';
+      if (inputType === 'submit' ||
+        inputType === 'button' ||
+        inputType === 'reset' ||
+        inputType === 'file' ||
+        inputType === 'image') {
+        return;
+      }
+
+      if ((inputType === 'checkbox' || inputType === 'radio') && !control.checked) {
+        return;
+      }
+
+      const derivedKey = deriveControlFieldKey(control);
+      if (!derivedKey) {
+        return;
+      }
+
+      if (control instanceof HTMLSelectElement && control.multiple) {
+        Array.from(control.selectedOptions).forEach((option) => {
+          entries.push({
+            key: derivedKey,
+            value: option.value
+          });
+        });
+        return;
+      }
+
+      entries.push({
+        key: derivedKey,
+        value: control.value
+      });
+    });
+
+    return entries;
+  };
+
+  const cloneFormData = (sourceFormData) => {
+    const clonedFormData = new FormData();
+    for (const [key, value] of sourceFormData.entries()) {
+      clonedFormData.append(key, value);
+    }
+    return clonedFormData;
+  };
+
+  const buildWebhookPayload = (sourceFormData, domDerivedEntries = getDomDerivedEntries()) => {
     const webhookFormData = new FormData();
     const skippedFields = [];
     const skippedUploadDetails = [];
+    const injectedFields = [];
+    const recoveredFieldMappings = [];
     const hasFileCtor = typeof File !== 'undefined';
     const hasBlobCtor = typeof Blob !== 'undefined';
     let sourceFieldCount = 0;
@@ -99,7 +285,66 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
         continue;
       }
 
-      webhookFormData.append(key, value);
+      const cleanedKey = cleanFieldKey(key);
+      const fallbackEntry = domDerivedEntries[sourceFieldCount - 1];
+      const resolvedKey = fieldKeyLooksGeneric(cleanedKey) && fallbackEntry && fallbackEntry.key
+        ? fallbackEntry.key
+        : cleanedKey;
+
+      if (resolvedKey && resolvedKey !== cleanedKey) {
+        recoveredFieldMappings.push({
+          originalKey: cleanedKey || '(blank)',
+          recoveredKey: resolvedKey
+        });
+      }
+
+      if (!resolvedKey) {
+        debugVerbose('Skipping field because no usable webhook key could be derived.', {
+          originalKey: key,
+          fieldIndex: sourceFieldCount
+        });
+        continue;
+      }
+
+      webhookFormData.append(resolvedKey, value);
+    }
+
+    if (timestampFieldName) {
+      const now = new Date();
+      const timestampValue = timestampFormat === 'human'
+        ? now.toLocaleString(timestampLocale, {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+          timeZoneName: 'short'
+        })
+        : now.toISOString();
+      webhookFormData.set(timestampFieldName, timestampValue);
+      injectedFields.push(timestampFieldName);
+      debugVerbose('Injected timestamp field.', {
+        field: timestampFieldName,
+        value: timestampValue,
+        format: timestampFormat,
+        locale: timestampLocale || '(browser default)'
+      });
+    }
+
+    if (pageSourceFieldName) {
+      const pageSourceValue = typeof window !== 'undefined' &&
+        window.location &&
+        typeof window.location.href === 'string'
+        ? window.location.href
+        : '';
+      webhookFormData.set(pageSourceFieldName, pageSourceValue);
+      injectedFields.push(pageSourceFieldName);
+      debugVerbose('Injected page source field.', {
+        field: pageSourceFieldName,
+        value: pageSourceValue
+      });
     }
 
     let webhookFieldCount = 0;
@@ -111,6 +356,8 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
       webhookFormData,
       skippedFields,
       skippedUploadDetails,
+      injectedFields,
+      recoveredFieldMappings,
       sourceFieldCount,
       webhookFieldCount
     };
@@ -119,26 +366,53 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
   let lastSubmitIntentTs = 0;
   let lastSubmitHandledTs = 0;
   let lastWebhookDispatchTs = 0;
+  let lastIntentFormDataSnapshot = null;
+  let lastIntentDomDerivedEntries = [];
   const SUBMIT_FLOW_TIMEOUT_MS = 2500;
   const WEBHOOK_DEDUP_WINDOW_MS = 1200;
 
   const trackSubmitIntent = (meta) => {
     lastSubmitIntentTs = Date.now();
     const currentIntentTs = lastSubmitIntentTs;
+    lastIntentFormDataSnapshot = cloneFormData(new FormData(formElem));
+    lastIntentDomDerivedEntries = getDomDerivedEntries();
+
     debugLog('Submit intent detected.');
     debugVerbose('Submit intent details:', meta);
+    debugVerbose('Captured form snapshot for submit intent.', {
+      capturedFieldCount: Array.from(lastIntentFormDataSnapshot.entries()).length
+    });
 
     setTimeout(() => {
-      if (lastSubmitHandledTs < currentIntentTs) {
-        debugWarn(
-          'Submit intent was detected, but no submit event fired shortly after. ' +
-          'Possible causes: blocked HTML validation, custom AJAX handler, or programmatic form.submit().'
-        );
+      const submitWasHandled = lastSubmitHandledTs >= currentIntentTs;
+      const webhookAlreadyDispatched = lastWebhookDispatchTs >= currentIntentTs;
+      if (submitWasHandled || webhookAlreadyDispatched) {
+        return;
       }
+
+      debugWarn(
+        'Submit intent was detected, but no submit event fired shortly after. ' +
+        'Applying AJAX compatibility fallback dispatch.'
+      );
+
+      if (typeof formElem.checkValidity === 'function' && !formElem.checkValidity()) {
+        debugWarn('Fallback dispatch skipped because form is currently invalid.');
+        return;
+      }
+
+      dispatchWebhookFromForm(
+        { via: 'submit-intent-timeout-fallback', usesIntentSnapshot: true },
+        lastIntentFormDataSnapshot,
+        lastIntentDomDerivedEntries
+      );
     }, SUBMIT_FLOW_TIMEOUT_MS);
   };
 
-  const dispatchWebhookFromForm = (triggerMeta) => {
+  const dispatchWebhookFromForm = (
+    triggerMeta,
+    sourceFormDataOverride = null,
+    domDerivedEntriesOverride = null
+  ) => {
     const now = Date.now();
     if (now - lastWebhookDispatchTs < WEBHOOK_DEDUP_WINDOW_MS) {
       debugVerbose('Skipping duplicate webhook dispatch.', {
@@ -153,14 +427,21 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
     debugVerbose('Webhook trigger details:', triggerMeta);
 
     try {
-      const sourceFormData = new FormData(formElem);
+      const sourceFormData = sourceFormDataOverride
+        ? cloneFormData(sourceFormDataOverride)
+        : new FormData(formElem);
+      const domDerivedEntries = Array.isArray(domDerivedEntriesOverride)
+        ? domDerivedEntriesOverride
+        : getDomDerivedEntries();
       const {
         webhookFormData,
         skippedFields,
         skippedUploadDetails,
+        injectedFields,
+        recoveredFieldMappings,
         sourceFieldCount,
         webhookFieldCount
-      } = buildWebhookPayload(sourceFormData);
+      } = buildWebhookPayload(sourceFormData, domDerivedEntries);
 
       debugLog('Payload prepared.');
       debugVerbose('Payload details:', {
@@ -168,10 +449,20 @@ function glIntegratelyWebhookLogic(formID, webhookURL, debug = false) {
         webhookFieldCount,
         skippedUploadFieldCount: skippedFields.length
       });
+      if (sourceFormDataOverride) {
+        debugVerbose('Webhook payload used captured submit-intent snapshot.');
+      }
 
       if (debugEnabled && skippedFields.length > 0) {
         debugLog('Skipped upload fields:', Array.from(new Set(skippedFields)));
         debugVerbose('Skipped upload details:', skippedUploadDetails);
+      }
+      if (debugEnabled && injectedFields.length > 0) {
+        debugLog('Injected webhook-only fields:', injectedFields);
+      }
+      if (debugEnabled && recoveredFieldMappings.length > 0) {
+        debugLog('Recovered readable field names for generic inputs.');
+        debugVerbose('Recovered field mappings:', recoveredFieldMappings);
       }
 
       if (webhookFieldCount === 0) {

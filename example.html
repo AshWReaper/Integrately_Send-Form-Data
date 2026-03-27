@@ -106,7 +106,14 @@
     glIntegratelyWebhookLogic(
       'contact-form',
       'YOUR_INTEGRATELY_WEBHOOK_URL',
-      false // Use true or 'verbose' only while troubleshooting.
+      false, // Use true or 'verbose' only while troubleshooting.
+      {
+        injectTimestampField: 'submitted_at',
+        injectPageSourceField: 'page_source_url',
+        timestampFormat: 'human',
+        timestampLocale: 'en-ZA',
+        preferPlaceholderFieldNames: true
+      }
     );
   </script>
 </body>
